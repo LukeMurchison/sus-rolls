@@ -11,6 +11,14 @@ const SusRolls = () => {
   const [sortBy, setSortBy] = useState("level");
   const [revealedCards, setRevealedCards] = useState([]);
   const [showingCards, setShowingCards] = useState(false);
+  const [currentUser, setCurrentUser] = useState("");
+  const [showLogin, setShowLogin] = useState(false);
+  const [newUsername, setNewUsername] = useState("");
+  const [allUsers, setAllUsers] = useState({});
+  const [showAddFriend, setShowAddFriend] = useState(false);
+  const [friendCode, setFriendCode] = useState("");
+  const [myFriendCode, setMyFriendCode] = useState("");
+  const [viewingUser, setViewingUser] = useState("");
 
   // Persistent storage that works in this environment
   const storageRef = useRef({
@@ -18,47 +26,135 @@ const SusRolls = () => {
     rollCount: 0
   });
 
-  // Persistent storage using localStorage (works in most environments)
+  // Track API requests to prevent rate limiting
+  const lastRequestTime = useRef(0);
+  const requestCount = useRef(0);
+
+  // Load user data and accounts
   useEffect(() => {
-    try {
-      const savedCollection = localStorage.getItem("susrolls_collection");
-      const savedRollCount = localStorage.getItem("susrolls_rollcount");
-      
-      if (savedCollection) {
-        const parsed = JSON.parse(savedCollection);
-        setUserCollection(parsed);
-        storageRef.current.collection = parsed;
-      }
-      if (savedRollCount) {
-        const count = parseInt(savedRollCount);
-        setRollCount(count);
-        storageRef.current.rollCount = count;
-      }
-    } catch (error) {
-      console.log('localStorage not available, using session storage');
-      // Fallback to our ref storage
-      setUserCollection(storageRef.current.collection);
-      setRollCount(storageRef.current.rollCount);
-    }
+    // Initialize with session storage since localStorage isn't available
+    setShowLogin(true);
   }, []);
 
-  const saveCollection = (collection) => {
-    try {
-      localStorage.setItem("susrolls_collection", JSON.stringify(collection));
-    } catch (error) {
-      console.log('localStorage not available');
+  // Generate or get friend code for current user
+  useEffect(() => {
+    if (currentUser) {
+      const friendCode = btoa(currentUser).replace(/[^a-zA-Z0-9]/g, '').substring(0, 8).toUpperCase();
+      setMyFriendCode(friendCode);
     }
+  }, [currentUser]);
+
+  const addFriend = () => {
+    if (!friendCode.trim()) return;
+    
+    // Find user by friend code
+    const friendUser = Object.keys(allUsers).find(username => {
+      const code = btoa(username).replace(/[^a-zA-Z0-9]/g, '').substring(0, 8).toUpperCase();
+      return code === friendCode.toUpperCase();
+    });
+    
+    if (!friendUser) {
+      alert("Friend code not found! Make sure your friend has created an account.");
+      return;
+    }
+    
+    if (friendUser === currentUser) {
+      alert("You can't add yourself as a friend!");
+      return;
+    }
+    
+    // Add to friends list
+    const updatedUsers = { ...allUsers };
+    if (!updatedUsers[currentUser].friends) updatedUsers[currentUser].friends = [];
+    if (!updatedUsers[currentUser].friends.includes(friendUser)) {
+      updatedUsers[currentUser].friends.push(friendUser);
+      setAllUsers(updatedUsers);
+      alert(`Added ${friendUser} as a friend!`);
+    } else {
+      alert("This person is already your friend!");
+    }
+    
+    setFriendCode("");
+    setShowAddFriend(false);
+  };
+
+  const getFriends = () => {
+    if (!currentUser || !allUsers[currentUser]) return [];
+    return allUsers[currentUser].friends || [];
+  };
+
+  const saveCollection = (collection) => {
+    if (!currentUser) return;
+    
+    const updatedUsers = { ...allUsers };
+    if (!updatedUsers[currentUser]) updatedUsers[currentUser] = {};
+    updatedUsers[currentUser].collection = collection;
+    setAllUsers(updatedUsers);
     storageRef.current.collection = collection;
   };
 
   const saveRollCount = (count) => {
-    try {
-      localStorage.setItem("susrolls_rollcount", count.toString());
-    } catch (error) {
-      console.log('localStorage not available');
-    }
+    if (!currentUser) return;
+    
+    const updatedUsers = { ...allUsers };
+    if (!updatedUsers[currentUser]) updatedUsers[currentUser] = {};
+    updatedUsers[currentUser].rollCount = count;
+    setAllUsers(updatedUsers);
     storageRef.current.rollCount = count;
     setRollCount(count);
+  };
+
+  const loadUserData = (username) => {
+    if (allUsers[username]) {
+      setUserCollection(allUsers[username].collection || []);
+      setRollCount(allUsers[username].rollCount || 0);
+      storageRef.current.collection = allUsers[username].collection || [];
+      storageRef.current.rollCount = allUsers[username].rollCount || 0;
+    }
+  };
+
+  const createAccount = () => {
+    if (!newUsername.trim()) return;
+    
+    const updatedUsers = { ...allUsers };
+    
+    if (updatedUsers[newUsername]) {
+      alert("Username already exists! Please choose a different one.");
+      return;
+    }
+    
+    updatedUsers[newUsername] = { collection: [], rollCount: 0, friends: [] };
+    
+    setAllUsers(updatedUsers);
+    setCurrentUser(newUsername);
+    setUserCollection([]);
+    setRollCount(0);
+    setShowLogin(false);
+    setNewUsername("");
+  };
+
+  const switchUser = (username) => {
+    setCurrentUser(username);
+    loadUserData(username);
+    setViewingUser("");
+    setShowMenu(false);
+  };
+
+  const viewUserCollection = (username) => {
+    setViewingUser(username);
+    setView("collection");
+    setShowMenu(false);
+  };
+
+  const getDisplayCollection = () => {
+    if (viewingUser && allUsers[viewingUser]) {
+      return allUsers[viewingUser].collection || [];
+    }
+    return userCollection;
+  };
+
+  const getDisplayUser = () => {
+    return viewingUser || currentUser;
   };
 
   // Create a single audio context to prevent distortion
@@ -73,6 +169,12 @@ const SusRolls = () => {
         return null;
       }
     }
+    
+    // Resume context if it's suspended (fixes audio issues after multiple uses)
+    if (audioContextRef.current.state === 'suspended') {
+      audioContextRef.current.resume().catch(console.log);
+    }
+    
     return audioContextRef.current;
   };
 
@@ -81,21 +183,25 @@ const SusRolls = () => {
     if (!audioContext) return;
     
     const createTone = (frequency, duration, type = 'sine', volume = 0.15) => {
-      const oscillator = audioContext.createOscillator();
-      const gainNode = audioContext.createGain();
-      
-      oscillator.connect(gainNode);
-      gainNode.connect(audioContext.destination);
-      
-      oscillator.frequency.setValueAtTime(frequency, audioContext.currentTime);
-      oscillator.type = type;
-      
-      gainNode.gain.setValueAtTime(0, audioContext.currentTime);
-      gainNode.gain.linearRampToValueAtTime(volume, audioContext.currentTime + 0.01);
-      gainNode.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + duration);
-      
-      oscillator.start(audioContext.currentTime);
-      oscillator.stop(audioContext.currentTime + duration);
+      try {
+        const oscillator = audioContext.createOscillator();
+        const gainNode = audioContext.createGain();
+        
+        oscillator.connect(gainNode);
+        gainNode.connect(audioContext.destination);
+        
+        oscillator.frequency.setValueAtTime(frequency, audioContext.currentTime);
+        oscillator.type = type;
+        
+        gainNode.gain.setValueAtTime(0, audioContext.currentTime);
+        gainNode.gain.linearRampToValueAtTime(volume, audioContext.currentTime + 0.01);
+        gainNode.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + duration);
+        
+        oscillator.start(audioContext.currentTime);
+        oscillator.stop(audioContext.currentTime + duration);
+      } catch (error) {
+        console.log('Audio error:', error);
+      }
     };
 
     const createChord = (frequencies, duration, volume = 0.1) => {
@@ -135,7 +241,8 @@ const SusRolls = () => {
   };
 
   const getSortedCollection = () => {
-    const sorted = [...userCollection];
+    const collection = getDisplayCollection();
+    const sorted = [...collection];
     
     switch (sortBy) {
       case "name":
@@ -152,13 +259,48 @@ const SusRolls = () => {
           const ageB = parseInt(b.age) || 0;
           return ageB - ageA;
         });
+      case "favorites":
+        return sorted.sort((a, b) => (b.favourites || 0) - (a.favourites || 0));
       case "level":
       default:
         return sorted.sort((a, b) => (b.level || 1) - (a.level || 1));
     }
   };
 
+  // Rate limiting helper
+  const waitForRateLimit = async (minDelay = 500) => {
+    const now = Date.now();
+    const timeSinceLastRequest = now - lastRequestTime.current;
+    
+    // Reset request count every minute
+    if (timeSinceLastRequest > 60000) {
+      requestCount.current = 0;
+    }
+    
+    // If we've made too many requests recently, wait longer
+    if (requestCount.current > 10) {
+      minDelay = 2000;
+    } else if (requestCount.current > 5) {
+      minDelay = 1000;
+    }
+    
+    if (timeSinceLastRequest < minDelay) {
+      await new Promise(resolve => setTimeout(resolve, minDelay - timeSinceLastRequest));
+    }
+    
+    lastRequestTime.current = Date.now();
+    requestCount.current++;
+  };
+
+  // Improved character fetching - one character per page for maximum diversity
   const getCharactersForPulls = async () => {
+    if (!currentUser) {
+      alert("Please login first!");
+      return;
+    }
+    
+    if (isRolling) return; // Prevent multiple concurrent rolls
+    
     setIsRolling(true);
     setRolledCharacters([]);
     setRevealedCards([]);
@@ -169,6 +311,10 @@ const SusRolls = () => {
     const query = `
       query ($page: Int, $perPage: Int) {
         Page(page: $page, perPage: $perPage) {
+          pageInfo {
+            total
+            lastPage
+          }
           characters {
             id
             name {
@@ -180,7 +326,7 @@ const SusRolls = () => {
             age
             siteUrl
             favourites
-            media(perPage: 5, sort: [POPULARITY_DESC]) {
+            media(perPage: 3, sort: [POPULARITY_DESC]) {
               nodes {
                 title {
                   romaji
@@ -194,89 +340,155 @@ const SusRolls = () => {
     `;
 
     try {
-      await new Promise(resolve => setTimeout(resolve, 1500));
-
       const results = [];
       const usedIds = new Set();
-
-      // Get characters from multiple random pages for true randomness
-      for (let i = 0; i < 5; i++) {
-        let attempts = 0;
-        let foundCharacter = false;
+      const usedSeries = new Set();
+      
+      // First, get total page count
+      let totalPages = 5000; // Default assumption
+      try {
+        await waitForRateLimit();
+        const testResponse = await fetch("https://graphql.anilist.co", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+          },
+          body: JSON.stringify({ 
+            query, 
+            variables: { page: 1, perPage: 1 }
+          }),
+        });
         
-        while (!foundCharacter && attempts < 10) {
-          const page = Math.floor(Math.random() * 200) + 1; // Much wider range
-          const variables = { page, perPage: 25 };
-
-          try {
-            const response = await fetch("https://graphql.anilist.co", {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-              },
-              body: JSON.stringify({ query, variables }),
-            });
-
-            if (!response.ok) {
-              attempts++;
-              continue;
-            }
-
-            const data = await response.json();
-            
-            if (data.errors || !data.data?.Page?.characters) {
-              attempts++;
-              continue;
-            }
-
-            const characters = data.data.Page.characters;
-
-            const valid = characters.filter((char) => {
-              if (!char || usedIds.has(char.id)) return false;
-              if (!char.name?.full) return false;
-              if (!char.image?.large) return false;
-              if (char.age && parseInt(char.age) < 18) return false;
-              return true;
-            });
-
-            if (valid.length > 0) {
-              const randomChar = valid[Math.floor(Math.random() * valid.length)];
-              results.push(randomChar);
-              usedIds.add(randomChar.id);
-              foundCharacter = true;
-            }
-            
-            attempts++;
-          } catch (error) {
-            console.error(`Error fetching page ${page}:`, error);
-            attempts++;
+        if (testResponse.ok) {
+          const testData = await testResponse.json();
+          if (testData.data?.Page?.pageInfo?.lastPage) {
+            totalPages = Math.min(testData.data.Page.pageInfo.lastPage, 5000); // Cap at 5000 for performance
+            console.log(`Total pages available: ${totalPages}`);
           }
         }
+      } catch (error) {
+        console.log('Could not determine total pages, using default range');
       }
       
-      setRolledCharacters(results);
+      // Strategy: Get exactly one character per page from 5 completely random pages
+      // This ensures maximum diversity across different series
+      let attempts = 0;
+      const maxAttempts = 20; // More attempts to ensure we get 5 good characters
+      
+      while (results.length < 5 && attempts < maxAttempts) {
+        try {
+          // Generate a truly random page number
+          const randomPage = Math.floor(Math.random() * totalPages) + 1;
+          
+          console.log(`Attempt ${attempts + 1}: Fetching from page ${randomPage}`);
+          
+          // Add rate limiting delay
+          await waitForRateLimit(600);
+          
+          const response = await fetch("https://graphql.anilist.co", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Accept": "application/json",
+            },
+            body: JSON.stringify({ 
+              query, 
+              variables: { page: randomPage, perPage: 25 } // Get 25 to have options
+            }),
+          });
+          
+          if (!response.ok) {
+            console.log(`Request failed with status: ${response.status}`);
+            attempts++;
+            continue;
+          }
+          
+          const data = await response.json();
+          
+          if (!data.data?.Page?.characters || data.data.Page.characters.length === 0) {
+            console.log(`No characters found on page ${randomPage}`);
+            attempts++;
+            continue;
+          }
+          
+          // Filter valid characters
+          const validCharacters = data.data.Page.characters.filter((char) => {
+            if (!char || !char.name?.full || !char.image?.large) return false;
+            if (char.age && parseInt(char.age) < 18) return false;
+            if (usedIds.has(char.id)) return false;
+            
+            // Check for series diversity (optional - prioritize but don't strictly enforce)
+            const seriesName = char.media?.nodes[0]?.title?.romaji;
+            if (seriesName && usedSeries.has(seriesName) && usedSeries.size < 4) {
+              // If we have less than 4 unique series so far, try to avoid duplicates
+              // But don't strictly enforce to avoid infinite loops
+              return Math.random() > 0.7; // 30% chance to still include
+            }
+            
+            return true;
+          });
+          
+          if (validCharacters.length === 0) {
+            console.log(`No valid characters found on page ${randomPage}`);
+            attempts++;
+            continue;
+          }
+          
+          // Randomly select one character from this page
+          const randomCharacter = validCharacters[Math.floor(Math.random() * validCharacters.length)];
+          
+          // Add to results
+          results.push(randomCharacter);
+          usedIds.add(randomCharacter.id);
+          
+          // Track series for diversity (but don't strictly enforce)
+          const seriesName = randomCharacter.media?.nodes[0]?.title?.romaji;
+          if (seriesName) {
+            usedSeries.add(seriesName);
+          }
+          
+          console.log(`Added character: ${randomCharacter.name.full} from ${seriesName || 'Unknown series'}`);
+          
+        } catch (error) {
+          console.error(`Error on attempt ${attempts + 1}:`, error);
+        }
+        
+        attempts++;
+      }
+      
+      if (results.length === 0) {
+        alert("Unable to fetch characters. Please try again in a moment.");
+        setIsRolling(false);
+        return;
+      }
+      
+      // Final shuffle to randomize the order
+      const finalResults = results.sort(() => Math.random() - 0.5);
+      
+      console.log(`Successfully fetched ${finalResults.length} characters from ${usedSeries.size} different series`);
+      
+      setRolledCharacters(finalResults);
       setIsRolling(false);
       setClaimedCharacterId(null);
       saveRollCount(rollCount + 1);
       
       // Start card reveal sequence
-      setTimeout(() => {
-        playSound('whoosh');
-        setShowingCards(true);
-        
-        // Reveal cards one by one
-        results.forEach((char, index) => {
-          setTimeout(() => {
-            const rarity = getCharacterRarity(char);
-            playSound(rarity === 'legendary' ? 'rare_reveal' : 'card_reveal');
-            setRevealedCards(prev => [...prev, index]);
-          }, 500 + (index * 300));
-        });
-      }, 500);
+      playSound('whoosh');
+      setShowingCards(true);
+      
+      // Reveal cards one by one
+      finalResults.forEach((char, index) => {
+        setTimeout(() => {
+          const rarity = getCharacterRarity(char);
+          playSound(rarity === 'legendary' ? 'rare_reveal' : 'card_reveal');
+          setRevealedCards(prev => [...prev, index]);
+        }, 200 + (index * 300));
+      });
 
     } catch (error) {
       console.error("Error in getCharactersForPulls:", error);
+      alert("Rolling failed. Please try again in a moment.");
       setIsRolling(false);
     }
   };
@@ -311,14 +523,15 @@ const SusRolls = () => {
       setUserCollection([]);
       setRollCount(0);
       setRolledCharacters([]);
+      setCurrentUser("");
+      setAllUsers({});
+      setViewingUser("");
       storageRef.current = { collection: [], rollCount: 0 };
-      try {
-        localStorage.removeItem("susrolls_collection");
-        localStorage.removeItem("susrolls_rollcount");
-      } catch (error) {
-        console.log('localStorage not available');
-      }
       setShowMenu(false);
+      setShowLogin(true);
+      // Reset API tracking
+      requestCount.current = 0;
+      lastRequestTime.current = 0;
     }
   };
 
@@ -345,11 +558,115 @@ const SusRolls = () => {
 
   return (
     <div style={styles.app}>
+      {/* Login Modal */}
+      {showLogin && (
+        <div style={styles.loginOverlay}>
+          <div style={styles.loginModal}>
+            <h2 style={styles.loginTitle}>Welcome to Sus Rolls!</h2>
+            <p style={styles.loginSubtext}>Create an account or login to start collecting</p>
+            
+            <div style={styles.loginForm}>
+              <input
+                type="text"
+                placeholder="Enter username"
+                value={newUsername}
+                onChange={(e) => setNewUsername(e.target.value)}
+                style={styles.loginInput}
+                onKeyPress={(e) => e.key === 'Enter' && createAccount()}
+              />
+              <button onClick={createAccount} style={styles.loginButton}>
+                Create Account
+              </button>
+            </div>
+            
+            {Object.keys(allUsers).length > 0 && (
+              <div style={styles.existingUsers}>
+                <p style={styles.existingUsersTitle}>Or login as existing user:</p>
+                <div style={styles.usersList}>
+                  {Object.keys(allUsers).map(username => (
+                    <button
+                      key={username}
+                      onClick={() => {
+                        switchUser(username);
+                        setShowLogin(false);
+                      }}
+                      style={styles.existingUserButton}
+                    >
+                      {username} ({allUsers[username]?.collection?.length || 0} cards)
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Add Friend Modal */}
+      {showAddFriend && (
+        <div style={styles.loginOverlay}>
+          <div style={styles.loginModal}>
+            <h2 style={styles.loginTitle}>Add Friend</h2>
+            <p style={styles.loginSubtext}>Enter your friend's code to add them</p>
+            
+            <div style={styles.friendCodeDisplay}>
+              <p style={styles.friendCodeLabel}>Your Friend Code:</p>
+              <div style={styles.friendCodeBox}>
+                <span style={styles.friendCode}>{myFriendCode}</span>
+                <button 
+                  onClick={() => navigator.clipboard.writeText(myFriendCode)}
+                  style={styles.copyButton}
+                >
+                  📋 Copy
+                </button>
+              </div>
+              <p style={styles.friendCodeHelp}>Share this code with friends so they can add you!</p>
+            </div>
+            
+            <div style={styles.loginForm}>
+              <input
+                type="text"
+                placeholder="Enter friend's code"
+                value={friendCode}
+                onChange={(e) => setFriendCode(e.target.value.toUpperCase())}
+                style={styles.loginInput}
+                onKeyPress={(e) => e.key === 'Enter' && addFriend()}
+              />
+              <div style={styles.modalButtons}>
+                <button onClick={addFriend} style={styles.loginButton}>
+                  Add Friend
+                </button>
+                <button 
+                  onClick={() => {
+                    setShowAddFriend(false);
+                    setFriendCode("");
+                  }} 
+                  style={styles.cancelButton}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div style={styles.header}>
         <h1 style={styles.title}>✨ Sus Rolls ✨</h1>
+        <div style={styles.userInfo}>
+          <span style={styles.currentUser}>👤 {getDisplayUser()}</span>
+          {viewingUser && (
+            <button 
+              onClick={() => {setViewingUser(""); setView("roll");}}
+              style={styles.backButton}
+            >
+              ← Back to My Account
+            </button>
+          )}
+        </div>
         <div style={styles.stats}>
-          <span>Total Rolls: {rollCount}</span>
-          <span>Collection: {userCollection.length}</span>
+          <span>Total Rolls: {viewingUser ? (allUsers[viewingUser]?.rollCount || 0) : rollCount}</span>
+          <span>Collection: {getDisplayCollection().length}</span>
         </div>
         
         <div style={styles.menuContainer}>
@@ -361,6 +678,34 @@ const SusRolls = () => {
           </button>
           {showMenu && (
             <div style={styles.dropdown}>
+              {!viewingUser && (
+                <>
+                  <button onClick={() => setShowLogin(true)} style={styles.dropdownItem}>
+                    👤 Switch Account
+                  </button>
+                  <button onClick={() => setShowAddFriend(true)} style={styles.dropdownItem}>
+                    ➕ Add Friend
+                  </button>
+                  <div style={styles.dropdownDivider}></div>
+                  <div style={styles.dropdownSection}>
+                    <span style={styles.dropdownSectionTitle}>My Friends:</span>
+                    {getFriends().length === 0 ? (
+                      <span style={styles.noFriendsText}>No friends added yet</span>
+                    ) : (
+                      getFriends().map(username => (
+                        <button
+                          key={username}
+                          onClick={() => viewUserCollection(username)}
+                          style={styles.dropdownItem}
+                        >
+                          🔍 {username} ({allUsers[username]?.collection?.length || 0})
+                        </button>
+                      ))
+                    )}
+                  </div>
+                  <div style={styles.dropdownDivider}></div>
+                </>
+              )}
               <button onClick={clearAllData} style={styles.dropdownItem}>
                 🗑️ Clear All Data
               </button>
@@ -370,17 +715,21 @@ const SusRolls = () => {
       </div>
 
       <div style={styles.navigation}>
-        {view === "roll" && (
+        {view === "roll" && !viewingUser && (
           <button 
             onClick={getCharactersForPulls} 
             disabled={isRolling}
-            style={{...styles.button, ...styles.rollButton}}
+            style={{
+              ...styles.button, 
+              ...styles.rollButton,
+              ...(isRolling ? {opacity: 0.6, cursor: 'not-allowed'} : {})
+            }}
           >
             {isRolling ? "Rolling..." : "🎲 Roll 5 Characters"}
           </button>
         )}
         
-        {userCollection.length > 0 && (
+        {getDisplayCollection().length > 0 && (
           <button 
             onClick={() => setView(view === "roll" ? "collection" : "roll")}
             style={{...styles.button, ...styles.viewButton}}
@@ -398,7 +747,8 @@ const SusRolls = () => {
               <div style={styles.orbGlow}></div>
             </div>
           </div>
-          <p style={styles.loadingText}>Summoning characters...</p>
+          <p style={styles.loadingText}>Summoning characters from across the anime universe...</p>
+          <p style={styles.loadingSubtext}>Finding diverse characters for maximum variety!</p>
         </div>
       )}
 
@@ -436,10 +786,50 @@ const SusRolls = () => {
                         {rarity.toUpperCase()}
                       </div>
                       {isOwned && <div style={styles.ownedBadge}>OWNED LV.{isOwned.level}</div>}
-                      <img src={char.image.large} alt={char.name.full} style={styles.cardImage} />
+                      <img 
+                        src={char.image.large} 
+                        alt={char.name.full} 
+                        style={styles.cardImage}
+                        onClick={(e) => {
+                          // Create and show full-size image modal
+                          const modal = document.createElement('div');
+                          modal.style.cssText = `
+                            position: fixed;
+                            top: 0;
+                            left: 0;
+                            width: 100%;
+                            height: 100%;
+                            background: rgba(0, 0, 0, 0.9);
+                            display: flex;
+                            align-items: center;
+                            justify-content: center;
+                            z-index: 10000;
+                            cursor: pointer;
+                          `;
+                          
+                          const img = document.createElement('img');
+                          img.src = char.image.large;
+                          img.style.cssText = `
+                            max-width: 90%;
+                            max-height: 90%;
+                            object-fit: contain;
+                            border-radius: 10px;
+                            box-shadow: 0 0 50px rgba(255, 255, 255, 0.3);
+                          `;
+                          
+                          modal.appendChild(img);
+                          document.body.appendChild(modal);
+                          
+                          modal.onclick = () => document.body.removeChild(modal);
+                        }}
+                      />
                       <div style={styles.cardContent}>
                         <div>
-                          <h3 style={styles.cardTitle}>{char.name.full}</h3>
+                          <h3 style={styles.cardTitle}>
+                            <a href={char.siteUrl} target="_blank" rel="noopener noreferrer" style={styles.characterLink}>
+                              {char.name.full}
+                            </a>
+                          </h3>
                           <p style={styles.cardInfo}>
                             <strong>Series:</strong> {char.media.nodes[0]?.title?.romaji || "Unknown"}
                           </p>
@@ -449,9 +839,6 @@ const SusRolls = () => {
                           <p style={styles.cardInfo}>
                             <strong>Favorites:</strong> {char.favourites || 0}
                           </p>
-                          <a href={char.siteUrl} target="_blank" rel="noopener noreferrer" style={styles.link}>
-                            View on AniList
-                          </a>
                         </div>
                         <div style={styles.cardBottom}>
                           <button 
@@ -479,7 +866,9 @@ const SusRolls = () => {
       {view === "collection" && (
         <div>
           <div style={styles.collectionHeader}>
-            <h2 style={styles.collectionTitle}>My Collection ({userCollection.length})</h2>
+            <h2 style={styles.collectionTitle}>
+              {viewingUser ? `${viewingUser}'s Collection` : 'My Collection'} ({getDisplayCollection().length})
+            </h2>
             
             <div style={styles.sortContainer}>
               <label style={styles.sortLabel}>Sort by: </label>
@@ -489,6 +878,7 @@ const SusRolls = () => {
                 style={styles.sortSelect}
               >
                 <option value="level">Level (High to Low)</option>
+                <option value="favorites">Favorites (High to Low)</option>
                 <option value="name">Name (A-Z)</option>
                 <option value="series">Series (A-Z)</option>
                 <option value="age">Age (High to Low)</option>
@@ -513,27 +903,69 @@ const SusRolls = () => {
                     {rarity.toUpperCase()}
                   </div>
                   <div style={styles.levelBadge}>LV.{char.level || 1}</div>
-                  <img src={char.image.large} alt={char.name.full} style={styles.cardImage} />
-                  <h3 style={styles.cardTitle}>{char.name.full}</h3>
+                  <img 
+                    src={char.image.large} 
+                    alt={char.name.full} 
+                    style={styles.cardImage}
+                    onClick={(e) => {
+                      // Create and show full-size image modal
+                      const modal = document.createElement('div');
+                      modal.style.cssText = `
+                        position: fixed;
+                        top: 0;
+                        left: 0;
+                        width: 100%;
+                        height: 100%;
+                        background: rgba(0, 0, 0, 0.9);
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        z-index: 10000;
+                        cursor: pointer;
+                      `;
+                      
+                      const img = document.createElement('img');
+                      img.src = char.image.large;
+                      img.style.cssText = `
+                        max-width: 90%;
+                        max-height: 90%;
+                        object-fit: contain;
+                        border-radius: 10px;
+                        box-shadow: 0 0 50px rgba(255, 255, 255, 0.3);
+                      `;
+                      
+                      modal.appendChild(img);
+                      document.body.appendChild(modal);
+                      
+                      modal.onclick = () => document.body.removeChild(modal);
+                    }}
+                  />
+                  <h3 style={styles.cardTitle}>
+                    <a href={char.siteUrl} target="_blank" rel="noreferrer" style={styles.characterLink}>
+                      {char.name.full}
+                    </a>
+                  </h3>
                   {char.age && <p style={styles.cardInfo}>Age: {char.age}</p>}
                   {char.media?.nodes[0]?.title?.romaji && (
                     <p style={styles.cardInfo}>From: {char.media.nodes[0].title.romaji}</p>
                   )}
-                  <a href={char.siteUrl} target="_blank" rel="noreferrer" style={styles.link}>
-                    View on AniList
-                  </a>
-                  <button 
-                    onClick={() => handleRemoveCharacter(char.id)}
-                    style={styles.removeButton}
-                  >
-                    Remove
-                  </button>
+                  <p style={styles.cardInfo}>Favorites: {char.favourites || 0}</p>
+                  {!viewingUser && (
+                    <button 
+                      onClick={() => handleRemoveCharacter(char.id)}
+                      style={styles.removeButton}
+                    >
+                      Remove
+                    </button>
+                  )}
                 </div>
               );
             })}
           </div>
-          {userCollection.length === 0 && (
-            <p style={styles.emptyCollection}>No characters in your collection yet. Start rolling!</p>
+          {getDisplayCollection().length === 0 && (
+            <p style={styles.emptyCollection}>
+              {viewingUser ? `${viewingUser} has no characters yet.` : "No characters in your collection yet. Start rolling!"}
+            </p>
           )}
         </div>
       )}
@@ -674,7 +1106,13 @@ const styles = {
     fontSize: "1.5rem",
     color: "#4ecdc4",
     textShadow: "0 0 20px rgba(78, 205, 196, 0.8)",
-    animation: "textGlow 1.5s ease-in-out infinite alternate"
+    animation: "textGlow 1.5s ease-in-out infinite alternate",
+    marginBottom: "0.5rem"
+  },
+  loadingSubtext: {
+    fontSize: "1rem",
+    color: "#ccc",
+    opacity: 0.8
   },
   cardBack: {
     width: "250px",
@@ -767,10 +1205,12 @@ const styles = {
   },
   cardImage: {
     width: "100%",
-    height: "200px", // Fixed height for consistency
-    objectFit: "cover", // Changed to cover for better consistency
+    height: "auto", // Allow natural height
+    maxHeight: "300px", // Maximum height to prevent overly tall images
+    objectFit: "contain", // Show full image without cropping
     borderRadius: "10px",
-    flexShrink: 0 // Prevent shrinking
+    flexShrink: 0, // Prevent shrinking
+    cursor: "pointer" // Indicate it's clickable
   },
   cardContent: {
     flex: 1,
@@ -785,21 +1225,10 @@ const styles = {
     color: "#fff",
     fontWeight: "bold"
   },
-  cardContent: {
-    flex: 1,
-    display: "flex",
-    flexDirection: "column",
-    paddingTop: "10px"
-  },
-  cardInfo: {
-    margin: "4px 0",
-    fontSize: "0.85rem",
-    color: "#ccc",
-    lineHeight: "1.3"
-  },
-  cardBottom: {
-    marginTop: "auto", // Push button to bottom
-    paddingTop: "15px"
+  characterLink: {
+    color: "#4ecdc4",
+    textDecoration: "none",
+    transition: "color 0.3s ease"
   },
   cardInfo: {
     margin: "4px 0",
@@ -807,6 +1236,10 @@ const styles = {
     color: "#ccc",
     lineHeight: "1.3",
     flexShrink: 0
+  },
+  cardBottom: {
+    marginTop: "auto", // Push button to bottom
+    paddingTop: "15px"
   },
   link: {
     color: "#4ecdc4",
@@ -884,6 +1317,194 @@ const styles = {
     fontSize: "1.2rem",
     color: "#666",
     marginTop: "3rem"
+  },
+  // Login and Account Styles
+  loginOverlay: {
+    position: "fixed",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: "rgba(0, 0, 0, 0.8)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 10000
+  },
+  loginModal: {
+    backgroundColor: "#16213e",
+    border: "3px solid #4ecdc4",
+    borderRadius: "20px",
+    padding: "2rem",
+    textAlign: "center",
+    maxWidth: "400px",
+    width: "90%",
+    boxShadow: "0 0 40px rgba(78, 205, 196, 0.3)"
+  },
+  loginTitle: {
+    fontSize: "2rem",
+    margin: "0 0 1rem 0",
+    color: "#4ecdc4",
+    textShadow: "0 0 10px rgba(78, 205, 196, 0.5)"
+  },
+  loginSubtext: {
+    fontSize: "1rem",
+    color: "#ccc",
+    marginBottom: "2rem"
+  },
+  loginForm: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "1rem",
+    marginBottom: "2rem"
+  },
+  loginInput: {
+    padding: "12px 16px",
+    fontSize: "1rem",
+    border: "2px solid rgba(255, 255, 255, 0.3)",
+    borderRadius: "10px",
+    backgroundColor: "#1a1a2e",
+    color: "#fff",
+    outline: "none"
+  },
+  loginButton: {
+    background: "linear-gradient(45deg, #4ecdc4, #45b7d1)",
+    color: "white",
+    border: "none",
+    padding: "12px 24px",
+    borderRadius: "20px",
+    fontSize: "1rem",
+    fontWeight: "bold",
+    cursor: "pointer",
+    transition: "all 0.3s ease"
+  },
+  existingUsers: {
+    borderTop: "1px solid rgba(255, 255, 255, 0.2)",
+    paddingTop: "1.5rem"
+  },
+  existingUsersTitle: {
+    fontSize: "0.9rem",
+    color: "#ccc",
+    marginBottom: "1rem"
+  },
+  usersList: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "0.5rem"
+  },
+  existingUserButton: {
+    background: "rgba(255, 255, 255, 0.1)",
+    border: "1px solid rgba(255, 255, 255, 0.3)",
+    color: "#fff",
+    padding: "8px 16px",
+    borderRadius: "10px",
+    cursor: "pointer",
+    fontSize: "0.9rem",
+    transition: "all 0.3s ease"
+  },
+  userInfo: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: "1rem",
+    marginBottom: "1rem",
+    flexWrap: "wrap"
+  },
+  currentUser: {
+    fontSize: "1.2rem",
+    color: "#4ecdc4",
+    fontWeight: "bold",
+    textShadow: "0 0 10px rgba(78, 205, 196, 0.5)"
+  },
+  backButton: {
+    background: "linear-gradient(45deg, #ff6b6b, #ee5a6f)",
+    color: "white",
+    border: "none",
+    padding: "8px 16px",
+    borderRadius: "15px",
+    fontSize: "0.9rem",
+    fontWeight: "bold",
+    cursor: "pointer",
+    transition: "all 0.3s ease"
+  },
+  dropdownDivider: {
+    height: "1px",
+    backgroundColor: "rgba(255, 255, 255, 0.2)",
+    margin: "8px 0"
+  },
+  dropdownSection: {
+    padding: "8px 0"
+  },
+  dropdownSectionTitle: {
+    fontSize: "0.8rem",
+    color: "#4ecdc4",
+    fontWeight: "bold",
+    padding: "0 16px 8px 16px",
+    display: "block"
+  },
+  // Friend System Styles
+  friendCodeDisplay: {
+    backgroundColor: "rgba(78, 205, 196, 0.1)",
+    border: "1px solid rgba(78, 205, 196, 0.3)",
+    borderRadius: "10px",
+    padding: "1rem",
+    marginBottom: "1.5rem"
+  },
+  friendCodeLabel: {
+    fontSize: "0.9rem",
+    color: "#4ecdc4",
+    marginBottom: "0.5rem",
+    fontWeight: "bold"
+  },
+  friendCodeBox: {
+    display: "flex",
+    alignItems: "center",
+    gap: "0.5rem",
+    marginBottom: "0.5rem"
+  },
+  friendCode: {
+    fontSize: "1.5rem",
+    fontWeight: "bold",
+    color: "#fff",
+    letterSpacing: "2px",
+    fontFamily: "monospace"
+  },
+  copyButton: {
+    background: "rgba(255, 255, 255, 0.2)",
+    border: "1px solid rgba(255, 255, 255, 0.3)",
+    color: "#fff",
+    padding: "4px 8px",
+    borderRadius: "6px",
+    fontSize: "0.8rem",
+    cursor: "pointer",
+    transition: "all 0.3s ease"
+  },
+  friendCodeHelp: {
+    fontSize: "0.8rem",
+    color: "#ccc",
+    margin: "0",
+    fontStyle: "italic"
+  },
+  modalButtons: {
+    display: "flex",
+    gap: "1rem"
+  },
+  cancelButton: {
+    background: "rgba(255, 255, 255, 0.1)",
+    border: "2px solid rgba(255, 255, 255, 0.3)",
+    color: "#fff",
+    padding: "12px 24px",
+    borderRadius: "20px",
+    fontSize: "1rem",
+    fontWeight: "bold",
+    cursor: "pointer",
+    transition: "all 0.3s ease"
+  },
+  noFriendsText: {
+    fontSize: "0.8rem",
+    color: "#666",
+    padding: "0 16px",
+    fontStyle: "italic"
   }
 };
 
