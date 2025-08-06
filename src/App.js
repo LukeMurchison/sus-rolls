@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useRef } from "react";
 
+import React, { useState, useEffect, useRef } from "react";
 const SusRolls = () => {
   const [rolledCharacters, setRolledCharacters] = useState([]);
   const [userCollection, setUserCollection] = useState([]);
@@ -11,6 +11,9 @@ const SusRolls = () => {
   const [sortBy, setSortBy] = useState("level");
   const [revealedCards, setRevealedCards] = useState([]);
   const [showingCards, setShowingCards] = useState(false);
+  const [availableRolls, setAvailableRolls] = useState(10);
+  const [currentRollIndex, setCurrentRollIndex] = useState(0);
+  const [timeUntilReset, setTimeUntilReset] = useState("");
   const [currentUser, setCurrentUser] = useState("");
   const [showLogin, setShowLogin] = useState(false);
   const [newUsername, setNewUsername] = useState("");
@@ -20,21 +23,146 @@ const SusRolls = () => {
   const [myFriendCode, setMyFriendCode] = useState("");
   const [viewingUser, setViewingUser] = useState("");
 
-  // Persistent storage that works in this environment
-  const storageRef = useRef({
-    collection: [],
-    rollCount: 0
-  });
-
   // Track API requests to prevent rate limiting
   const lastRequestTime = useRef(0);
   const requestCount = useRef(0);
 
-  // Load user data and accounts
+  // Timer for countdown
+  const countdownTimer = useRef(null);
+
+  // Get next hour reset time
+  const getNextResetTime = () => {
+    const now = new Date();
+    const nextHour = new Date(now);
+    nextHour.setHours(now.getHours() + 1, 0, 0, 0);
+    return nextHour;
+  };
+
+  // Check if it's time to reset rolls
+  const shouldResetRolls = (lastResetTime) => {
+    if (!lastResetTime) return true;
+    const now = new Date();
+    const lastReset = new Date(lastResetTime);
+    return now.getHours() !== lastReset.getHours() || now.getDate() !== lastReset.getDate();
+  };
+
+  // Update countdown timer
+  const updateCountdown = () => {
+    const now = new Date();
+    const nextReset = getNextResetTime();
+    const timeDiff = nextReset - now;
+    
+    if (timeDiff <= 0) {
+      // Time to reset!
+      resetUserRolls();
+      return;
+    }
+
+    const minutes = Math.floor(timeDiff / (1000 * 60));
+    const seconds = Math.floor((timeDiff % (1000 * 60)) / 1000);
+    setTimeUntilReset(`${minutes}:${seconds.toString().padStart(2, '0')}`);
+  };
+
+  // Reset user's rolls
+  const resetUserRolls = () => {
+    if (!currentUser) return;
+    
+    const updatedUsers = { ...allUsers };
+    if (!updatedUsers[currentUser]) updatedUsers[currentUser] = {};
+    
+    updatedUsers[currentUser].availableRolls = 10;
+    updatedUsers[currentUser].rolledCharacters = [];
+    updatedUsers[currentUser].currentRollIndex = 0;
+    updatedUsers[currentUser].claimedCharacterId = null;
+    updatedUsers[currentUser].lastResetTime = new Date().toISOString();
+    
+    setAllUsers(updatedUsers);
+    saveAllUsers(updatedUsers);
+    
+    setAvailableRolls(10);
+    setRolledCharacters([]);
+    setCurrentRollIndex(0);
+    setClaimedCharacterId(null);
+    setRevealedCards([]);
+    setShowingCards(false);
+  };
+
+  // Start countdown timer
   useEffect(() => {
-    // Initialize with session storage since localStorage isn't available
-    setShowLogin(true);
+    updateCountdown();
+    countdownTimer.current = setInterval(updateCountdown, 1000);
+    
+    return () => {
+      if (countdownTimer.current) {
+        clearInterval(countdownTimer.current);
+      }
+    };
+  }, [currentUser, allUsers]);
+
+  // Storage helper functions that work both in artifacts and on GitHub Pages
+  const getStorageItem = (key) => {
+    try {
+      // Try localStorage first (works on GitHub Pages)
+      if (typeof localStorage !== 'undefined') {
+        return localStorage.getItem(key);
+      }
+    } catch (error) {
+      console.log('localStorage not available');
+    }
+    return null;
+  };
+
+  const setStorageItem = (key, value) => {
+    try {
+      // Try localStorage first (works on GitHub Pages)
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(key, value);
+        return true;
+      }
+    } catch (error) {
+      console.log('localStorage not available');
+    }
+    return false;
+  };
+
+  // Load all user data on app start
+  useEffect(() => {
+    const savedUsers = getStorageItem('susRolls_allUsers');
+    const savedCurrentUser = getStorageItem('susRolls_currentUser');
+    
+    if (savedUsers) {
+      try {
+        const parsedUsers = JSON.parse(savedUsers);
+        setAllUsers(parsedUsers);
+        
+        if (savedCurrentUser && parsedUsers[savedCurrentUser]) {
+          setCurrentUser(savedCurrentUser);
+          loadUserData(savedCurrentUser, parsedUsers);
+          setShowLogin(false);
+        } else {
+          setShowLogin(true);
+        }
+      } catch (error) {
+        console.error('Error loading saved data:', error);
+        setShowLogin(true);
+      }
+    } else {
+      setShowLogin(true);
+    }
   }, []);
+
+  // Handle spacebar press for rolling
+  useEffect(() => {
+    const handleKeyPress = (event) => {
+      if (event.code === 'Space' && !showLogin && !showAddFriend && !showMenu && view === "roll" && !viewingUser) {
+        event.preventDefault();
+        rollSingleCharacter();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyPress);
+    return () => window.removeEventListener('keydown', handleKeyPress);
+  }, [availableRolls, isRolling, showLogin, showAddFriend, showMenu, view, viewingUser]);
 
   // Generate or get friend code for current user
   useEffect(() => {
@@ -69,6 +197,7 @@ const SusRolls = () => {
     if (!updatedUsers[currentUser].friends.includes(friendUser)) {
       updatedUsers[currentUser].friends.push(friendUser);
       setAllUsers(updatedUsers);
+      saveAllUsers(updatedUsers);
       alert(`Added ${friendUser} as a friend!`);
     } else {
       alert("This person is already your friend!");
@@ -83,6 +212,14 @@ const SusRolls = () => {
     return allUsers[currentUser].friends || [];
   };
 
+  const saveAllUsers = (users) => {
+    setStorageItem('susRolls_allUsers', JSON.stringify(users));
+  };
+
+  const saveCurrentUser = (username) => {
+    setStorageItem('susRolls_currentUser', username);
+  };
+
   const saveCollection = (collection) => {
     if (!currentUser) return;
     
@@ -90,7 +227,21 @@ const SusRolls = () => {
     if (!updatedUsers[currentUser]) updatedUsers[currentUser] = {};
     updatedUsers[currentUser].collection = collection;
     setAllUsers(updatedUsers);
-    storageRef.current.collection = collection;
+    saveAllUsers(updatedUsers);
+  };
+
+  const saveUserRollState = (rolls, characters, rollIndex, claimed) => {
+    if (!currentUser) return;
+    
+    const updatedUsers = { ...allUsers };
+    if (!updatedUsers[currentUser]) updatedUsers[currentUser] = {};
+    updatedUsers[currentUser].availableRolls = rolls;
+    updatedUsers[currentUser].rolledCharacters = characters;
+    updatedUsers[currentUser].currentRollIndex = rollIndex;
+    updatedUsers[currentUser].claimedCharacterId = claimed;
+    updatedUsers[currentUser].lastResetTime = updatedUsers[currentUser].lastResetTime || new Date().toISOString();
+    setAllUsers(updatedUsers);
+    saveAllUsers(updatedUsers);
   };
 
   const saveRollCount = (count) => {
@@ -100,16 +251,47 @@ const SusRolls = () => {
     if (!updatedUsers[currentUser]) updatedUsers[currentUser] = {};
     updatedUsers[currentUser].rollCount = count;
     setAllUsers(updatedUsers);
-    storageRef.current.rollCount = count;
+    saveAllUsers(updatedUsers);
     setRollCount(count);
   };
 
-  const loadUserData = (username) => {
-    if (allUsers[username]) {
-      setUserCollection(allUsers[username].collection || []);
-      setRollCount(allUsers[username].rollCount || 0);
-      storageRef.current.collection = allUsers[username].collection || [];
-      storageRef.current.rollCount = allUsers[username].rollCount || 0;
+  const loadUserData = (username, users = allUsers) => {
+    if (users[username]) {
+      setUserCollection(users[username].collection || []);
+      setRollCount(users[username].rollCount || 0);
+      
+      // Check if rolls need to be reset
+      if (shouldResetRolls(users[username].lastResetTime)) {
+        setAvailableRolls(10);
+        setRolledCharacters([]);
+        setCurrentRollIndex(0);
+        setClaimedCharacterId(null);
+        setRevealedCards([]);
+        setShowingCards(false);
+        // Save the reset state
+        const updatedUsers = { ...users };
+        updatedUsers[username].availableRolls = 10;
+        updatedUsers[username].rolledCharacters = [];
+        updatedUsers[username].currentRollIndex = 0;
+        updatedUsers[username].claimedCharacterId = null;
+        updatedUsers[username].lastResetTime = new Date().toISOString();
+        setAllUsers(updatedUsers);
+        saveAllUsers(updatedUsers);
+      } else {
+        // Load existing roll state
+        setAvailableRolls(users[username].availableRolls !== undefined ? users[username].availableRolls : 10);
+        setRolledCharacters(users[username].rolledCharacters || []);
+        setCurrentRollIndex(users[username].currentRollIndex || 0);
+        setClaimedCharacterId(users[username].claimedCharacterId || null);
+        
+        // Set up revealed cards based on current roll index
+        const revealedIndexes = [];
+        for (let i = 0; i < (users[username].currentRollIndex || 0); i++) {
+          revealedIndexes.push(i);
+        }
+        setRevealedCards(revealedIndexes);
+        setShowingCards((users[username].rolledCharacters || []).length > 0);
+      }
     }
   };
 
@@ -123,18 +305,34 @@ const SusRolls = () => {
       return;
     }
     
-    updatedUsers[newUsername] = { collection: [], rollCount: 0, friends: [] };
+    updatedUsers[newUsername] = { 
+      collection: [], 
+      rollCount: 0, 
+      friends: [],
+      availableRolls: 10,
+      rolledCharacters: [],
+      currentRollIndex: 0,
+      claimedCharacterId: null,
+      lastResetTime: new Date().toISOString()
+    };
     
     setAllUsers(updatedUsers);
+    saveAllUsers(updatedUsers);
     setCurrentUser(newUsername);
+    saveCurrentUser(newUsername);
     setUserCollection([]);
     setRollCount(0);
+    setAvailableRolls(10);
+    setRolledCharacters([]);
+    setCurrentRollIndex(0);
+    setClaimedCharacterId(null);
     setShowLogin(false);
     setNewUsername("");
   };
 
   const switchUser = (username) => {
     setCurrentUser(username);
+    saveCurrentUser(username);
     loadUserData(username);
     setViewingUser("");
     setShowMenu(false);
@@ -292,20 +490,21 @@ const SusRolls = () => {
     requestCount.current++;
   };
 
-  // Improved character fetching - one character per page for maximum diversity
-  const getCharactersForPulls = async () => {
+  // Roll a single character
+  const rollSingleCharacter = async () => {
     if (!currentUser) {
       alert("Please login first!");
+      return;
+    }
+    
+    if (availableRolls <= 0) {
+      alert("No rolls remaining! Wait for the next hourly reset.");
       return;
     }
     
     if (isRolling) return; // Prevent multiple concurrent rolls
     
     setIsRolling(true);
-    setRolledCharacters([]);
-    setRevealedCards([]);
-    setShowingCards(false);
-    
     playSound('roll_start');
     
     const query = `
@@ -340,50 +539,17 @@ const SusRolls = () => {
     `;
 
     try {
-      const results = [];
-      const usedIds = new Set();
-      const usedSeries = new Set();
-      
-      // First, get total page count
-      let totalPages = 5000; // Default assumption
-      try {
-        await waitForRateLimit();
-        const testResponse = await fetch("https://graphql.anilist.co", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-          },
-          body: JSON.stringify({ 
-            query, 
-            variables: { page: 1, perPage: 1 }
-          }),
-        });
-        
-        if (testResponse.ok) {
-          const testData = await testResponse.json();
-          if (testData.data?.Page?.pageInfo?.lastPage) {
-            totalPages = Math.min(testData.data.Page.pageInfo.lastPage, 5000); // Cap at 5000 for performance
-            console.log(`Total pages available: ${totalPages}`);
-          }
-        }
-      } catch (error) {
-        console.log('Could not determine total pages, using default range');
-      }
-      
-      // Strategy: Get exactly one character per page from 5 completely random pages
-      // This ensures maximum diversity across different series
+      let character = null;
       let attempts = 0;
-      const maxAttempts = 20; // More attempts to ensure we get 5 good characters
+      const maxAttempts = 10;
       
-      while (results.length < 5 && attempts < maxAttempts) {
+      // Get total page count if we don't have it
+      let totalPages = 5000;
+      
+      while (!character && attempts < maxAttempts) {
         try {
-          // Generate a truly random page number
           const randomPage = Math.floor(Math.random() * totalPages) + 1;
           
-          console.log(`Attempt ${attempts + 1}: Fetching from page ${randomPage}`);
-          
-          // Add rate limiting delay
           await waitForRateLimit(600);
           
           const response = await fetch("https://graphql.anilist.co", {
@@ -394,12 +560,11 @@ const SusRolls = () => {
             },
             body: JSON.stringify({ 
               query, 
-              variables: { page: randomPage, perPage: 25 } // Get 25 to have options
+              variables: { page: randomPage, perPage: 25 }
             }),
           });
           
           if (!response.ok) {
-            console.log(`Request failed with status: ${response.status}`);
             attempts++;
             continue;
           }
@@ -407,7 +572,6 @@ const SusRolls = () => {
           const data = await response.json();
           
           if (!data.data?.Page?.characters || data.data.Page.characters.length === 0) {
-            console.log(`No characters found on page ${randomPage}`);
             attempts++;
             continue;
           }
@@ -416,39 +580,16 @@ const SusRolls = () => {
           const validCharacters = data.data.Page.characters.filter((char) => {
             if (!char || !char.name?.full || !char.image?.large) return false;
             if (char.age && parseInt(char.age) < 18) return false;
-            if (usedIds.has(char.id)) return false;
-            
-            // Check for series diversity (optional - prioritize but don't strictly enforce)
-            const seriesName = char.media?.nodes[0]?.title?.romaji;
-            if (seriesName && usedSeries.has(seriesName) && usedSeries.size < 4) {
-              // If we have less than 4 unique series so far, try to avoid duplicates
-              // But don't strictly enforce to avoid infinite loops
-              return Math.random() > 0.7; // 30% chance to still include
-            }
-            
             return true;
           });
           
           if (validCharacters.length === 0) {
-            console.log(`No valid characters found on page ${randomPage}`);
             attempts++;
             continue;
           }
           
-          // Randomly select one character from this page
-          const randomCharacter = validCharacters[Math.floor(Math.random() * validCharacters.length)];
-          
-          // Add to results
-          results.push(randomCharacter);
-          usedIds.add(randomCharacter.id);
-          
-          // Track series for diversity (but don't strictly enforce)
-          const seriesName = randomCharacter.media?.nodes[0]?.title?.romaji;
-          if (seriesName) {
-            usedSeries.add(seriesName);
-          }
-          
-          console.log(`Added character: ${randomCharacter.name.full} from ${seriesName || 'Unknown series'}`);
+          // Select random character
+          character = validCharacters[Math.floor(Math.random() * validCharacters.length)];
           
         } catch (error) {
           console.error(`Error on attempt ${attempts + 1}:`, error);
@@ -457,44 +598,54 @@ const SusRolls = () => {
         attempts++;
       }
       
-      if (results.length === 0) {
-        alert("Unable to fetch characters. Please try again in a moment.");
+      if (!character) {
+        alert("Unable to fetch character. Please try again in a moment.");
         setIsRolling(false);
         return;
       }
       
-      // Final shuffle to randomize the order
-      const finalResults = results.sort(() => Math.random() - 0.5);
+      // Add character to rolled characters array
+      const newRolledCharacters = [...rolledCharacters, character];
+      const newRollIndex = currentRollIndex;
+      const newAvailableRolls = availableRolls - 1;
       
-      console.log(`Successfully fetched ${finalResults.length} characters from ${usedSeries.size} different series`);
+      setRolledCharacters(newRolledCharacters);
+      setAvailableRolls(newAvailableRolls);
       
-      setRolledCharacters(finalResults);
-      setIsRolling(false);
-      setClaimedCharacterId(null);
+      // Save state
+      saveUserRollState(newAvailableRolls, newRolledCharacters, newRollIndex, claimedCharacterId);
+      
+      // Update total roll count
       saveRollCount(rollCount + 1);
       
       // Start card reveal sequence
       playSound('whoosh');
       setShowingCards(true);
       
-      // Reveal cards one by one
-      finalResults.forEach((char, index) => {
-        setTimeout(() => {
-          const rarity = getCharacterRarity(char);
-          playSound(rarity === 'legendary' ? 'rare_reveal' : 'card_reveal');
-          setRevealedCards(prev => [...prev, index]);
-        }, 200 + (index * 300));
-      });
+      // Reveal the new card
+      setTimeout(() => {
+        const rarity = getCharacterRarity(character);
+        playSound(rarity === 'legendary' ? 'rare_reveal' : 'card_reveal');
+        setRevealedCards(prev => [...prev, newRollIndex]);
+        setCurrentRollIndex(newRollIndex + 1);
+        
+        // Save updated roll index
+        saveUserRollState(newAvailableRolls, newRolledCharacters, newRollIndex + 1, claimedCharacterId);
+      }, 500);
 
     } catch (error) {
-      console.error("Error in getCharactersForPulls:", error);
+      console.error("Error in rollSingleCharacter:", error);
       alert("Rolling failed. Please try again in a moment.");
+    } finally {
       setIsRolling(false);
     }
   };
 
   const handleClaimCharacter = (character) => {
-    if (claimedCharacterId) return;
+    if (claimedCharacterId) {
+      alert("You can only claim one character per hour! Wait for the reset.");
+      return;
+    }
     
     playSound('claim');
     
@@ -510,6 +661,9 @@ const SusRolls = () => {
     setUserCollection(newCollection);
     saveCollection(newCollection);
     setClaimedCharacterId(character.id);
+    
+    // Save claim state
+    saveUserRollState(availableRolls, rolledCharacters, currentRollIndex, character.id);
   };
 
   const handleRemoveCharacter = (id) => {
@@ -520,13 +674,34 @@ const SusRolls = () => {
 
   const clearAllData = () => {
     if (window.confirm("Are you sure you want to clear all data? This cannot be undone.")) {
+      // Clear from storage
+      try {
+        if (typeof localStorage !== 'undefined') {
+          localStorage.removeItem('susRolls_allUsers');
+          localStorage.removeItem('susRolls_currentUser');
+        }
+      } catch (error) {
+        console.log('Could not clear localStorage');
+      }
+      
+      // Clear countdown timer
+      if (countdownTimer.current) {
+        clearInterval(countdownTimer.current);
+      }
+      
+      // Reset state
       setUserCollection([]);
       setRollCount(0);
       setRolledCharacters([]);
       setCurrentUser("");
       setAllUsers({});
       setViewingUser("");
-      storageRef.current = { collection: [], rollCount: 0 };
+      setAvailableRolls(10);
+      setCurrentRollIndex(0);
+      setClaimedCharacterId(null);
+      setRevealedCards([]);
+      setShowingCards(false);
+      setTimeUntilReset("");
       setShowMenu(false);
       setShowLogin(true);
       // Reset API tracking
@@ -655,6 +830,13 @@ const SusRolls = () => {
         <h1 style={styles.title}>✨ Sus Rolls ✨</h1>
         <div style={styles.userInfo}>
           <span style={styles.currentUser}>👤 {getDisplayUser()}</span>
+          {!viewingUser && (
+            <div style={styles.rollStatus}>
+              <span style={styles.rollsRemaining}>🎲 Rolls: {availableRolls}/10</span>
+              <span style={styles.resetTimer}>⏰ Reset: {timeUntilReset}</span>
+              {claimedCharacterId && <span style={styles.claimStatus}>✅ Claimed</span>}
+            </div>
+          )}
           {viewingUser && (
             <button 
               onClick={() => {setViewingUser(""); setView("roll");}}
@@ -716,17 +898,27 @@ const SusRolls = () => {
 
       <div style={styles.navigation}>
         {view === "roll" && !viewingUser && (
-          <button 
-            onClick={getCharactersForPulls} 
-            disabled={isRolling}
-            style={{
-              ...styles.button, 
-              ...styles.rollButton,
-              ...(isRolling ? {opacity: 0.6, cursor: 'not-allowed'} : {})
-            }}
-          >
-            {isRolling ? "Rolling..." : "🎲 Roll 5 Characters"}
-          </button>
+          <div style={styles.rollControls}>
+            <button 
+              onClick={rollSingleCharacter} 
+              disabled={isRolling || availableRolls <= 0}
+              style={{
+                ...styles.button, 
+                ...styles.rollButton,
+                ...(isRolling || availableRolls <= 0 ? {opacity: 0.6, cursor: 'not-allowed'} : {})
+              }}
+            >
+              {isRolling ? "Rolling..." : `🎲 Roll Character (${availableRolls} left)`}
+            </button>
+            {availableRolls > 0 && !isRolling && (
+              <p style={styles.spacebarHint}>Press SPACEBAR to roll!</p>
+            )}
+            {availableRolls === 0 && (
+              <p style={styles.noRollsMessage}>
+                No rolls remaining! Next reset in: {timeUntilReset}
+              </p>
+            )}
+          </div>
         )}
         
         {getDisplayCollection().length > 0 && (
@@ -747,13 +939,22 @@ const SusRolls = () => {
               <div style={styles.orbGlow}></div>
             </div>
           </div>
-          <p style={styles.loadingText}>Summoning characters from across the anime universe...</p>
-          <p style={styles.loadingSubtext}>Finding diverse characters for maximum variety!</p>
+          <p style={styles.loadingText}>Summoning a character from the anime universe...</p>
+          <p style={styles.loadingSubtext}>Roll {11 - availableRolls} of 10</p>
         </div>
       )}
 
-      {view === "roll" && !isRolling && showingCards && (
+      {view === "roll" && !isRolling && showingCards && rolledCharacters.length > 0 && (
         <div>
+          <div style={styles.rollSummary}>
+            <h3 style={styles.rollSummaryTitle}>Your Rolled Characters ({rolledCharacters.length}/10)</h3>
+            {claimedCharacterId ? (
+              <p style={styles.claimMessage}>✅ You have claimed your character for this hour!</p>
+            ) : (
+              <p style={styles.claimInstructions}>💡 Click "Claim" on ONE character to add it to your collection!</p>
+            )}
+          </div>
+          
           <div style={styles.cardGrid}>
             {rolledCharacters.map((char, index) => {
               const rarity = getCharacterRarity(char);
@@ -762,7 +963,7 @@ const SusRolls = () => {
               const isClaimed = claimedCharacterId === char.id;
               
               return (
-                <div key={char.id} style={styles.cardContainer}>
+                <div key={`${char.id}-${index}`} style={styles.cardContainer}>
                   {!isRevealed ? (
                     // Card Back
                     <div style={styles.cardBack}>
@@ -850,7 +1051,7 @@ const SusRolls = () => {
                               ...(claimedCharacterId !== null && !isClaimed ? styles.claimButtonDisabled : {})
                             }}
                           >
-                            {isClaimed ? "Claimed!" : (claimedCharacterId !== null ? "Available" : "Claim")}
+                            {isClaimed ? "Claimed!" : (claimedCharacterId !== null ? "Cannot Claim" : "Claim")}
                           </button>
                         </div>
                       </div>
@@ -1505,6 +1706,77 @@ const styles = {
     color: "#666",
     padding: "0 16px",
     fontStyle: "italic"
+  },
+  // New Roll System Styles
+  rollStatus: {
+    display: "flex",
+    alignItems: "center",
+    gap: "1rem",
+    fontSize: "1rem",
+    flexWrap: "wrap"
+  },
+  rollsRemaining: {
+    color: "#4ecdc4",
+    fontWeight: "bold",
+    textShadow: "0 0 10px rgba(78, 205, 196, 0.5)"
+  },
+  resetTimer: {
+    color: "#ff6b6b",
+    fontWeight: "bold",
+    textShadow: "0 0 10px rgba(255, 107, 107, 0.5)"
+  },
+  claimStatus: {
+    color: "#28a745",
+    fontWeight: "bold",
+    textShadow: "0 0 10px rgba(40, 167, 69, 0.5)"
+  },
+  rollControls: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: "1rem"
+  },
+  spacebarHint: {
+    fontSize: "0.9rem",
+    color: "#ccc",
+    fontStyle: "italic",
+    margin: "0"
+  },
+  noRollsMessage: {
+    fontSize: "1rem",
+    color: "#ff6b6b",
+    fontWeight: "bold",
+    textAlign: "center",
+    margin: "0",
+    textShadow: "0 0 10px rgba(255, 107, 107, 0.5)"
+  },
+  rollSummary: {
+    textAlign: "center",
+    marginBottom: "2rem",
+    padding: "1rem",
+    backgroundColor: "rgba(78, 205, 196, 0.1)",
+    borderRadius: "15px",
+    border: "2px solid rgba(78, 205, 196, 0.3)"
+  },
+  rollSummaryTitle: {
+    fontSize: "1.5rem",
+    color: "#4ecdc4",
+    margin: "0 0 1rem 0",
+    textShadow: "0 0 10px rgba(78, 205, 196, 0.5)"
+  },
+  claimMessage: {
+    fontSize: "1.1rem",
+    color: "#28a745",
+    margin: "0",
+    fontWeight: "bold",
+    textShadow: "0 0 10px rgba(40, 167, 69, 0.5)"
+  },
+  claimInstructions: {
+    fontSize: "1.1rem",
+    color: "#ffd700",
+    margin: "0",
+    fontWeight: "bold",
+    textShadow: "0 0 10px rgba(255, 215, 0, 0.5)"
   }
 };
 
